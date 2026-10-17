@@ -1,0 +1,17 @@
+# Nemotron models on Nebius Token Factory. IDs from the Token Factory catalog;
+# check them and each model card's recommended sampling before the pilot.
+# Keep sampling identical across prompt variants (only model and prompt vary).
+[defaults]
+base_url = "https://api.tokenfactory.nebius.com/v1/"
+temperature = 0.6
+top_p = 0.95
+max_tokens = 4096
+
+[models.nano]
+model = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"
+
+[models.super]
+model = "nvidia/nemotron-3-super-120b-a12b"
+
+[models.ultra]
+model = "nvidia/Nemotron-3-Ultra-550b-a55b"

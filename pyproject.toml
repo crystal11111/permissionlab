@@ -1,0 +1,13 @@
+[project]
+name = "permissionlab-spike"
+version = "0.1.0"
+description = "Day-1 authority-drift spike harness for PermissionLab"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

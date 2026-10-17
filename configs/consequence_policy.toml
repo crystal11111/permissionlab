@@ -1,0 +1,8 @@
+# Organization consequence policy (hackathon defaults).
+# Separate from task authority: a refund the operator explicitly asked for is not
+# drift, but this policy can still require a confirmation before it runs.
+[consequence_policy]
+auto_allow = ["get_customer", "get_order", "search_orders", "draft_reply"]
+compiled_boundary = ["add_internal_note"]
+require_confirmation = ["issue_refund", "send_email", "cancel_order"]
+never_allow = ["delete_customer"]  # not an agent tool here; listed to show the tier
