@@ -1,14 +1,21 @@
-"""Run the drift matrix (tasks x models x system prompts x repetitions) into append-only JSONL."""
+"""Run the drift matrix (tasks x models x system prompts x repetitions) into append-only JSONL.
+
+The first run of a run id writes a manifest that pins everything the results depend on:
+the run spec (backend, models with their sampling, prompts, repetitions, tasks, step
+limit) and the hash of every input file. Resuming with anything different is refused.
+"""
 from __future__ import annotations
 
 import json
 import random
+import subprocess
 import threading
 import tomllib
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .agent import SYSTEM_PROMPTS, AgentBackend, OpenAICompatibleAgent, ReplayAgent, prompt_sha256
 from .io import file_sha256, load_rules, load_tasks
@@ -20,6 +27,12 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 CONFIG_DIR = ROOT / "configs"
 RUNS_DIR = ROOT / "runs"
+
+# Only API failures are worth re-running. A truncated or empty reply is the model's
+# behavior under this config; re-running it until it looks better would cherry-pick.
+RETRYABLE_END_REASONS = ("agent_error",)
+
+AgentFactory = Callable[[TaskSpec, str, dict], AgentBackend]
 
 
 class ExperimentError(RuntimeError):
@@ -41,14 +54,25 @@ def load_model_configs(path: Path = CONFIG_DIR / "models.toml") -> dict[str, dic
     return {key: {**defaults, **cfg} for key, cfg in data.get("models", {}).items()}
 
 
-def smoke_agent(task: TaskSpec) -> AgentBackend:
+def code_version() -> str | None:
+    try:
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True,
+                                check=True).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True,
+                               check=True).stdout.strip()
+        return commit + ("+uncommitted" if dirty else "")
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def smoke_agent(task: TaskSpec, model: str, cfg: dict) -> AgentBackend:
     """Offline stand-in for a model: read the order in context, then answer."""
     order_id = task.context.get("current_order_id", "#W123")
     return ReplayAgent([AgentTurn.tool("get_order", order_id=order_id),
                         AgentTurn.final("Summary: reviewed the order. Recommend following up with the customer.")])
 
 
-def nebius_agent(cfg: dict) -> AgentBackend:
+def nebius_agent(task: TaskSpec, model: str, cfg: dict) -> AgentBackend:
     return OpenAICompatibleAgent(
         model=cfg["model"], base_url=cfg.get("base_url", OpenAICompatibleAgent.base_url),
         temperature=cfg.get("temperature"), top_p=cfg.get("top_p"), max_tokens=cfg.get("max_tokens"),
@@ -56,18 +80,63 @@ def nebius_agent(cfg: dict) -> AgentBackend:
     )
 
 
-def read_done(path: Path, retry_errors: bool) -> set[str]:
-    done: dict[str, bool] = {}
-    if path.exists():
-        for line in path.read_text().splitlines():
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # a torn final line is simply re-run
-            done[record["episode_key"]] = record["trace"]["end_reason"] != "agent_error"
-    return {key for key, ok in done.items() if ok or not retry_errors}
+def read_log(path: Path, *, on_torn_tail: Callable[[bytes], None] | None = None) -> dict[str, list[dict]]:
+    """All attempts per episode key, in the order they were written.
+
+    A half-written last record (the process died mid-write) is passed to on_torn_tail and
+    skipped. A corrupt record anywhere else is an error: we never silently drop data.
+    """
+    if not path.exists():
+        return {}
+    data = path.read_bytes()
+    cut = data.rfind(b"\n") + 1
+    if cut < len(data):
+        if on_torn_tail is None:
+            raise ExperimentError(f"{path} ends with a half-written record")
+        on_torn_tail(data[cut:])
+    attempts: dict[str, list[dict]] = {}
+    for number, line in enumerate(data[:cut].decode().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ExperimentError(f"{path}:{number} is corrupt ({exc.msg}); fix or remove that line") from None
+        attempts.setdefault(record["episode_key"], []).append(record)
+    return attempts
+
+
+def repair_torn_tail(path: Path, log: Callable[[str], None]) -> None:
+    """Before appending, move a half-written last record aside so new records start on a clean line."""
+    if not path.exists():
+        return
+    data = path.read_bytes()
+    cut = data.rfind(b"\n") + 1
+    if cut == len(data):
+        return
+    torn = path.with_name(f"{path.name}.torn-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}")
+    torn.write_bytes(data[cut:])
+    path.write_bytes(data[:cut])
+    log(f"moved a half-written record to {torn.name}; that episode will be re-run")
+
+
+def build_manifest(*, spec: dict, inputs: dict) -> dict:
+    return {"spec": spec, "inputs": inputs}
+
+
+def check_manifest(manifest_path: Path, fresh: dict) -> dict:
+    """Create the manifest, or verify a resume matches it exactly."""
+    if not manifest_path.exists():
+        return {"created_at": now(), **fresh, "invocations": []}
+    manifest = json.loads(manifest_path.read_text())
+    diffs = [f"spec.{k}" for k in sorted(set(manifest["spec"]) | set(fresh["spec"]))
+             if manifest["spec"].get(k) != fresh["spec"].get(k)]
+    diffs += [f"inputs.{k}" for k in sorted(set(manifest["inputs"]) | set(fresh["inputs"]))
+              if manifest["inputs"].get(k) != fresh["inputs"].get(k)]
+    if diffs:
+        raise ExperimentError(f"this run was started with different settings ({', '.join(diffs)}); "
+                              "results would mix. Use a new --run-id.")
+    return manifest
 
 
 def run_matrix(
@@ -87,9 +156,15 @@ def run_matrix(
     labels_path: Path = DATA_DIR / "labels_adjudicated.csv",
     policy_path: Path = CONFIG_DIR / "consequence_policy.toml",
     models_path: Path = CONFIG_DIR / "models.toml",
+    prereg_path: Path = CONFIG_DIR / "preregistration.toml",
     runs_dir: Path = RUNS_DIR,
+    agent_factory: AgentFactory | None = None,
     log: Callable[[str], None] = print,
 ) -> Path:
+    if backend not in ("nebius", "smoke"):
+        raise ExperimentError(f"unknown backend {backend!r}")
+    if allow_unlabeled and backend != "smoke":
+        raise ExperimentError("--allow-unlabeled is only for the smoke backend; label the tasks first")
     all_tasks = load_tasks(tasks_path)
     tasks = [t for t in all_tasks if not task_ids or t.id in task_ids]
     if task_ids and len(tasks) != len(set(task_ids)):
@@ -103,60 +178,68 @@ def run_matrix(
             raise ExperimentError(f"unknown prompt {p!r}; known: {', '.join(SYSTEM_PROMPTS)}")
     load_policy(policy_path)
     if not allow_unlabeled:
-        # Pre-registration: labels are complete and fixed before any model runs.
-        load_rules(labels_path, all_tasks)
-    if backend not in ("nebius", "smoke"):
-        raise ExperimentError(f"unknown backend {backend!r}")
+        load_rules(labels_path, all_tasks)  # labels complete and valid before any model runs
 
-    run_dir = runs_dir / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    hashes = {
+    spec = {
+        "backend": backend,
+        "models": {m: model_configs[m] for m in models},
+        "prompts": prompts,
+        "repetitions": repetitions,
+        "tasks": [t.id for t in tasks],
+        "max_steps": max_steps,
+        "labels_checked": not allow_unlabeled,
+    }
+    inputs = {
         "tasks": file_sha256(tasks_path),
-        "labels": file_sha256(labels_path) if labels_path.exists() else None,
+        "labels": None if allow_unlabeled else file_sha256(labels_path),
         "policy": file_sha256(policy_path),
-        "models": file_sha256(models_path),
+        "models_config": file_sha256(models_path),
+        "preregistration": file_sha256(prereg_path),
         "prompts": {name: prompt_sha256(SYSTEM_PROMPTS[name]) for name in prompts},
     }
-    invocation = {"at": now(), "backend": backend, "models": {m: model_configs[m]["model"] for m in models},
-                  "prompts": prompts, "repetitions": repetitions, "tasks": [t.id for t in tasks],
-                  "max_steps": max_steps, "allow_unlabeled": allow_unlabeled}
+    run_dir = runs_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = run_dir / "manifest.json"
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
-        changed = [k for k in ("tasks", "labels", "policy", "models") if manifest["hashes"].get(k) != hashes[k]]
-        if changed:
-            raise ExperimentError(f"{', '.join(changed)} changed since run {run_id!r} started; use a new run id")
-        manifest["hashes"]["prompts"].update(hashes["prompts"])
-        manifest["invocations"].append(invocation)
-    else:
-        manifest = {"run_id": run_id, "created_at": now(), "hashes": hashes, "invocations": [invocation]}
+    manifest = check_manifest(manifest_path, build_manifest(spec=spec, inputs=inputs))
+    manifest["invocations"].append({"at": now(), "code": code_version(), "retry_errors": retry_errors})
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     episodes_path = run_dir / "episodes.jsonl"
-    done = read_done(episodes_path, retry_errors)
+    repair_torn_tail(episodes_path, log)
+    attempts = read_log(episodes_path)
     plan = [(t, m, p, r) for t in tasks for m in models for p in prompts for r in range(1, repetitions + 1)]
-    pending = [x for x in plan if episode_key(x[0].id, x[1], x[2], x[3]) not in done]
+
+    def needs_run(key: str) -> bool:
+        history = attempts.get(key)
+        if not history:
+            return True
+        return retry_errors and history[-1]["trace"]["end_reason"] in RETRYABLE_END_REASONS
+
+    pending = [x for x in plan if needs_run(episode_key(x[0].id, x[1], x[2], x[3]))]
     # Interleave conditions so time-varying API behavior doesn't line up with one model.
     random.Random(seed).shuffle(pending)
     log(f"run {run_id}: {len(plan)} planned, {len(plan) - len(pending)} done, {len(pending)} to run")
 
+    factory = agent_factory or (smoke_agent if backend == "smoke" else nebius_agent)
     runner = EpisodeRunner(max_steps=max_steps)
     lock = threading.Lock()
     progress = {"done": 0, "errors": 0}
 
     def work(item: tuple[TaskSpec, str, str, int]) -> None:
         task, model, prompt, rep = item
-        agent = smoke_agent(task) if backend == "smoke" else nebius_agent(model_configs[model])
-        trace = runner.run(task, agent, model=model, system_prompt=SYSTEM_PROMPTS[prompt],
-                           system_prompt_variant=prompt, repetition=rep)
-        record = {"episode_key": episode_key(task.id, model, prompt, rep), "recorded_at": now(),
-                  "model_id": model_configs[model]["model"], "trace": trace.to_dict()}
-        line = json.dumps(record, ensure_ascii=False, default=str)
+        key = episode_key(task.id, model, prompt, rep)
+        trace = runner.run(task, factory(task, model, model_configs[model]), model=model,
+                           system_prompt=SYSTEM_PROMPTS[prompt], system_prompt_variant=prompt, repetition=rep)
         with lock:
+            attempt = len(attempts.setdefault(key, [])) + 1
+            record = {"episode_key": key, "attempt": attempt, "attempt_id": uuid.uuid4().hex,
+                      "recorded_at": now(), "model_id": model_configs[model]["model"], "trace": trace.to_dict()}
+            attempts[key].append(record)
             with episodes_path.open("a") as f:
-                f.write(line + "\n")
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
             progress["done"] += 1
-            progress["errors"] += trace.end_reason in ("agent_error", "harness_error")
+            progress["errors"] += trace.end_reason in ("agent_error", "truncated", "empty_response",
+                                                       "harness_error")
             if progress["done"] % 10 == 0 or progress["done"] == len(pending):
                 log(f"  {progress['done']}/{len(pending)} episodes, {progress['errors']} errors")
 

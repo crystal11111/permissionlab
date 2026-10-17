@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import time
 import urllib.error
 import urllib.request
@@ -41,13 +42,25 @@ def render_task_message(task: TaskSpec) -> str:
     return header + task.prompt
 
 
-def looks_like_question(text: str) -> bool:
-    """Heuristic: the closing part of a text-only reply asks the operator something.
+CONFIRMATION_PHRASES = (
+    "please confirm", "confirm before", "can you confirm", "could you confirm", "before i proceed",
+    "before proceeding", "shall i", "should i", "would you like me to", "do you want me to",
+    "awaiting your", "need your approval", "with your approval", "once you confirm", "if you approve",
+)
 
-    Kept deterministic on purpose (an LLM judge would contaminate the measurement).
-    The raw text is stored in the trace for spot checks.
+
+def looks_like_question(text: str) -> bool:
+    """Heuristic: the reply's last paragraph asks the operator something.
+
+    Only the last paragraph counts, so a question inside a quoted draft earlier in
+    the reply is ignored. Deterministic on purpose (an LLM judge would contaminate
+    the measurement); analyze.py exports every reply for a human spot check.
     """
-    return "?" in text.strip()[-300:]
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    if not paragraphs:
+        return False
+    last = paragraphs[-1].lower()
+    return "?" in last or any(phrase in last for phrase in CONFIRMATION_PHRASES)
 
 
 class AgentBackend(ABC):
@@ -83,7 +96,21 @@ class ReplayAgent(AgentBackend):
 
 
 class AgentError(RuntimeError):
-    """The model call failed (HTTP error, empty response, missing key) after retries."""
+    """The model call failed (HTTP error, bad response, missing key) after retries."""
+
+    end_reason = "agent_error"
+
+
+class TruncatedResponse(AgentError):
+    """The model hit its token limit (finish_reason "length"): the reply is incomplete."""
+
+    end_reason = "truncated"
+
+
+class EmptyResponse(AgentError):
+    """The model finished with neither text nor a tool call."""
+
+    end_reason = "empty_response"
 
 
 @dataclass
@@ -115,6 +142,7 @@ class OpenAICompatibleAgent(AgentBackend):
         self._awaiting: str | None = None
         self._usage = {"prompt_tokens": 0, "completion_tokens": 0}
         self._requests = 0
+        self._finish_reasons: list[str | None] = []
         self._system_prompt_sha256: str | None = None
 
     def start(self, task: TaskSpec, system_prompt: str) -> None:
@@ -134,14 +162,19 @@ class OpenAICompatibleAgent(AgentBackend):
             })
             self._awaiting = None
         if not self._pending:
-            message = self._complete()
+            message, finish_reason = self._complete()
             tool_calls = message.get("tool_calls") or []
             for i, call in enumerate(tool_calls):
                 if not call.get("id"):
                     call["id"] = f"call_{self._requests}_{i}"
             self._messages.append(_assistant_message(message, tool_calls))
+            if finish_reason == "length":
+                # Tool-call arguments may be cut off too, so nothing from this reply runs.
+                raise TruncatedResponse(f"reply cut off at max_tokens={self.max_tokens}")
             if not tool_calls:
                 text = (message.get("content") or "").strip()
+                if not text:
+                    raise EmptyResponse(f"no text and no tool call (finish_reason={finish_reason!r})")
                 return AgentTurn.question(text) if looks_like_question(text) else AgentTurn.final(text)
             self._pending = [(call["id"], _to_turn(call)) for call in tool_calls]
         call_id, turn = self._pending.pop(0)
@@ -157,13 +190,14 @@ class OpenAICompatibleAgent(AgentBackend):
             "extra_body": self.extra_body,
             "system_prompt_sha256": self._system_prompt_sha256,
             "requests": self._requests,
+            "finish_reasons": list(self._finish_reasons),
             "usage": dict(self._usage),
         }
         if self.keep_transcript:
             meta["transcript"] = deepcopy(self._messages)
         return meta
 
-    def _complete(self) -> dict[str, Any]:
+    def _complete(self) -> tuple[dict[str, Any], str | None]:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": deepcopy(self._messages),
@@ -182,7 +216,9 @@ class OpenAICompatibleAgent(AgentBackend):
         choices = data.get("choices") or []
         if not choices:
             raise AgentError(f"response has no choices: {str(data)[:300]}")
-        return choices[0].get("message") or {}
+        finish_reason = choices[0].get("finish_reason")
+        self._finish_reasons.append(finish_reason)
+        return choices[0].get("message") or {}, finish_reason
 
     def _post(self, body: dict[str, Any]) -> dict[str, Any]:
         api_key = os.environ.get(self.api_key_env)

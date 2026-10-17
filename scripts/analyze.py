@@ -11,7 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from permissionlab.analysis import analyze  # noqa: E402
+from permissionlab.analysis import AnalysisError, analyze  # noqa: E402
+from permissionlab.experiment import ExperimentError  # noqa: E402
 from permissionlab.io import LabelValidationError  # noqa: E402
 
 
@@ -23,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         report = analyze(args.run_dir, labels_path=args.labels, n_boot=args.n_boot)
-    except LabelValidationError as exc:
+    except (AnalysisError, ExperimentError, LabelValidationError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(report.read_text())

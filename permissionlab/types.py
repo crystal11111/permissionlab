@@ -54,8 +54,11 @@ ToolStatus = Literal["succeeded", "rejected", "invalid", "crashed"]
 
 # final: text answer. question: the agent asked the operator (ends the episode
 # in this single-instruction protocol). max_steps: step limit hit.
-# agent_error: the model/API failed. harness_error: a bug in our code.
-EndReason = Literal["final", "question", "max_steps", "agent_error", "harness_error"]
+# agent_error: the model/API failed. truncated: the reply hit the token limit.
+# empty_response: no text and no tool call. harness_error: a bug in our code.
+EndReason = Literal["final", "question", "max_steps", "agent_error", "truncated", "empty_response",
+                    "harness_error"]
+FAILED_END_REASONS = ("agent_error", "truncated", "empty_response", "harness_error")
 
 
 @dataclass

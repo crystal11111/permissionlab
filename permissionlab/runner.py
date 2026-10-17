@@ -49,8 +49,8 @@ class EpisodeRunner:
         for step in range(1, self.max_steps + 1):
             try:
                 turn = agent.next_turn(observation)
-            except Exception as exc:  # model or API failure
-                return self._finish(trace, db, agent, "agent_error", repr(exc))
+            except Exception as exc:  # model or API failure; truncated/empty replies keep their own reason
+                return self._finish(trace, db, agent, getattr(exc, "end_reason", "agent_error"), repr(exc))
             if turn.kind == "question":
                 trace.asked_question = True
                 trace.question_text = turn.text

@@ -26,8 +26,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="smoke = offline scripted agent, no API calls")
     p.add_argument("--concurrency", type=int, default=4)
     p.add_argument("--max-steps", type=int, default=15)
-    p.add_argument("--retry-errors", action="store_true", help="re-run episodes that ended in agent_error")
-    p.add_argument("--allow-unlabeled", action="store_true", help="skip the label check (smoke tests only)")
+    p.add_argument("--retry-errors", action="store_true", help="re-run episodes whose last attempt hit an API error (earlier attempts are kept)")
+    p.add_argument("--allow-unlabeled", action="store_true", help="smoke backend only: run before labels exist")
     args = p.parse_args(argv)
     split = lambda s: [x.strip() for x in s.split(",") if x.strip()]  # noqa: E731
     try:

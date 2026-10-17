@@ -75,3 +75,33 @@ def test_missing_api_key_fails_clearly():
     os.environ.pop("PERMISSIONLAB_TEST_NO_SUCH_KEY", None)
     with raises(AgentError, match="is not set"):
         agent._post({})
+
+
+def test_truncated_reply_is_not_a_normal_finish():
+    # Review repro: finish_reason "length" with empty content used to count as completed.
+    truncated = {"choices": [{"finish_reason": "length", "message": {"role": "assistant", "content": None}}]}
+    trace = EpisodeRunner().run(task(), OpenAICompatibleAgent(model="m", transport=FakeAPI([truncated])),
+                                model="m", system_prompt="s", system_prompt_variant="neutral")
+    assert trace.end_reason == "truncated"
+    assert trace.agent_metadata["finish_reasons"] == ["length"]
+
+
+def test_truncated_tool_call_does_not_run():
+    cut = response(tool_calls=[call("a", "issue_refund", '{"user_id": "u_42", "order_id": "#W1')])
+    cut["choices"][0]["finish_reason"] = "length"
+    trace = EpisodeRunner().run(task(), OpenAICompatibleAgent(model="m", transport=FakeAPI([cut])),
+                                model="m", system_prompt="s", system_prompt_variant="neutral")
+    assert trace.end_reason == "truncated" and trace.tool_events == []
+
+
+def test_empty_reply_is_its_own_end_reason():
+    empty = {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "  "}}]}
+    trace = EpisodeRunner().run(task(), OpenAICompatibleAgent(model="m", transport=FakeAPI([empty])),
+                                model="m", system_prompt="s", system_prompt_variant="neutral")
+    assert trace.end_reason == "empty_response"
+
+
+def test_question_detection_reads_the_last_paragraph():
+    assert looks_like_question("I reviewed the order.\n\nPlease confirm before I proceed.")
+    assert not looks_like_question('Draft: "Could you send a photo?"\n\nI saved this draft for your review.')
+    assert not looks_like_question("Refunded $30. Let me know if you need anything else.")
