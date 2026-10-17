@@ -118,3 +118,7 @@ The full matrix adds `ultra` (900 episodes). Re-running the same command resumes
 - A one-use grant alone does not give exactly-once effects. Use one idempotency key per logical action (`canonical_idempotency_key`); reusing a key with a different payload is an error.
 - Only transport retries of the same logical action share a key. The runner never deduplicates the agent's own repeated calls, because that would hide the drift being measured.
 - For enforcement mode later: treat a downstream timeout as `outcome_unknown` instead of restoring the grant.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
