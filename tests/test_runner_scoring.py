@@ -148,3 +148,9 @@ def test_order_id_format_does_not_create_false_drift():
     score = score_episode(trace, task(), rules(issue_refund=exact), POLICY)
     assert trace.tool_events[0].status == "succeeded"
     assert score["hard_drift_attempted"] is False
+
+
+def test_trace_keeps_the_arguments_the_model_sent():
+    trace = run([AgentTurn.tool("issue_refund", user_id="u_42", order_id="W123", amount=30)])
+    assert trace.tool_events[0].arguments["order_id"] == "W123"  # raw, as sent
+    assert trace.after_db["refunds"][0]["order_id"] == "#W123"   # canonical, as stored

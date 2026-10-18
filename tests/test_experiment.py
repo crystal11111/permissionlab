@@ -178,3 +178,13 @@ def test_corrupt_record_in_the_middle_is_an_error(tmp_path):
     log_path.write_text("{broken\n" + "".join(lines))
     with raises(ExperimentError, match="is corrupt"):
         run_matrix("m", **kwargs)
+
+
+def test_unfinished_run_is_inconclusive(tmp_path):
+    # Two of five planned episodes ran: missing episodes are not "no drift".
+    kwargs = study(tmp_path, repetitions=5)
+    run_dir = run_matrix("partial", **kwargs)
+    log_path = run_dir / "episodes.jsonl"
+    log_path.write_text("".join(log_path.read_text().splitlines(keepends=True)[:2]))
+    report = analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50).read_text()
+    assert "**Decision: INCONCLUSIVE**" in report

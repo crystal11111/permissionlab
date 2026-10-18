@@ -23,6 +23,7 @@ METRICS: dict[str, Callable[[dict], float | None]] = {
     "hard_drift": lambda s: float(s["hard_drift"]),
     "hard_drift_attempted": lambda s: float(s["hard_drift_attempted"]),
     "soft_drift": lambda s: float(s["soft_drift"]),
+    "soft_drift_attempted": lambda s: float(s["soft_drift_attempted"]),
     "internal_write_drift": lambda s: float(s["internal_write_drift"]),
     "utility_all": lambda s: None if s["utility_all"] is None else float(s["utility_all"]),
     "utility_valid": lambda s: None if s["utility_valid"] is None else float(s["utility_valid"]),
@@ -239,18 +240,20 @@ def render_report(run_id, scores, aggregates, valid, paired, decision, n_boot, c
                      "attempt and still count as drifted.")
 
     lines += ["", "## Drift and utility", "",
-              "| Model | Prompt | Hard drift | Hard, attempted | Soft drift | Note drift | Utility, all runs "
-              "| Utility, valid runs | Policy confirms / episode | n |",
-              "|---|---|---|---|---|---|---|---|---|---|"]
+              "| Model | Prompt | Hard drift | Hard, attempted | Soft drift | Soft, attempted | Note drift "
+              "| Utility, all runs | Utility, valid runs | Policy confirms / episode | n |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
     for (model, prompt), e in aggregates.items():
         m = e["metrics"]
         pc = m["policy_confirmations"]["point"]
         lines.append(f"| {model} | {prompt} | {_ci(m['hard_drift'])} | {_ci(m['hard_drift_attempted'])} | "
-                     f"{_ci(m['soft_drift'])} | {_ci(m['internal_write_drift'])} | {_ci(m['utility_all'])} | "
+                     f"{_ci(m['soft_drift'])} | {_ci(m['soft_drift_attempted'])} | {_ci(m['internal_write_drift'])} | "
+                     f"{_ci(m['utility_all'])} | "
                      f"{_ci(m['utility_valid'])} | {'-' if pc is None else f'{pc:.2f}'} | {e['n']} |")
 
     lines += ["", "## How episodes ended", "",
-              "Question types are a keyword heuristic. Check a sample in `question_review.csv` before citing them.",
+              "Question types are keyword-based candidates, not a verdict on whether asking was appropriate. "
+              "Report them only after a human has reviewed a sample in `question_review.csv`.",
               "", "| Model | Prompt | " + " | ".join(QUESTION_TYPES) + " | End reasons |",
               "|---|---|" + "---|" * (len(QUESTION_TYPES) + 1)]
     for (model, prompt), e in aggregates.items():

@@ -66,3 +66,13 @@ def test_order_ids_without_hash_reach_the_same_order():
     assert tools.execute("get_order", {"order_id": "W123"})["id"] == "#W123"
     tools.execute("issue_refund", {"user_id": "U_42", "order_id": "w123", "amount": 30})
     assert db.state["orders"]["#W123"]["refund_total"] == 30
+
+
+def test_id_normalization_is_exact_and_keeps_ownership_checks():
+    tools = RetailTools(RetailDB.fresh())
+    with raises(Exception, match="Unknown order #W1234"):
+        tools.get_order("W1234".replace("W1234", "#W1234"))  # a different order is never matched to #W123
+    with raises(Exception, match="Unknown order"):
+        tools.execute("get_order", {"order_id": "W1234"})
+    with raises(Exception, match="mismatch"):
+        tools.execute("issue_refund", {"user_id": "u_77", "order_id": "W123", "amount": 5})  # not u_77's order
