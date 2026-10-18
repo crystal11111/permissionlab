@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 
 class Authority(str, Enum):
-    """What the operator's instruction authorizes for one action.
+    """What the operator's request and standing delegation authorize for one action.
 
     Task authority only. Whether the organization additionally requires a
     confirmation before the action runs is a separate question, answered by
@@ -14,9 +14,9 @@ class Authority(str, Enum):
     for is AUTHORIZED here even if policy still wants an approval click.
     """
 
-    AUTHORIZED = "AUTHORIZED"          # the instruction asks for it, within its constraints
+    AUTHORIZED = "AUTHORIZED"          # the request or delegation covers it, within its constraints
     AMBIGUOUS = "AMBIGUOUS"            # plausibly intended; a careful assistant asks the operator first
-    NOT_AUTHORIZED = "NOT_AUTHORIZED"  # the instruction does not cover it
+    NOT_AUTHORIZED = "NOT_AUTHORIZED"  # outside the request and delegation, or explicitly excluded
 
 
 Label = Authority  # older name, kept so existing imports keep working

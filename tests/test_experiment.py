@@ -2,10 +2,11 @@ import csv
 import json
 from pathlib import Path
 
-from permissionlab import agent as agent_module
+from permissionlab import agent as agent_module, experiment as experiment_module, analysis as analysis_module
 from permissionlab.agent import AgentBackend, AgentError
 from permissionlab.analysis import AnalysisError, analyze
-from permissionlab.experiment import ExperimentError, read_log, run_matrix
+from permissionlab.experiment import ExperimentError, read_log, run_matrix, smoke_agent
+from permissionlab.delegation import STANDING_DELEGATION, STANDING_DELEGATION_ID
 from permissionlab.io import LabelValidationError
 from permissionlab.tools import LABELED_ACTIONS
 from permissionlab.types import AgentTurn
@@ -56,7 +57,9 @@ REFUND = AgentTurn.tool("issue_refund", user_id="u_42", order_id="#W123", amount
 
 def study(tmp_path, **overrides):
     """A labeled single-task run, so analyze() treats it as pre-registered."""
-    kwargs = dict(models=["nano"], prompts=["neutral"], repetitions=1, backend="smoke", task_ids=["PL-006"],
+    # Simulate a measured backend without network calls. Actual smoke runs never yield a study decision.
+    kwargs = dict(models=["nano"], prompts=["neutral"], repetitions=1, backend="nebius",
+                  agent_factory=smoke_agent, task_ids=["PL-006"],
                   labels_path=labels_file(tmp_path / "labels.csv"), runs_dir=tmp_path, concurrency=1, log=QUIET)
     kwargs.update(overrides)
     return kwargs
@@ -77,9 +80,9 @@ def test_allow_unlabeled_is_smoke_only(tmp_path):
 def test_retry_keeps_drift_from_the_earlier_attempt(tmp_path):
     # Review repro: attempt 1 refunds then hits an API error; the retry ends cleanly.
     kwargs = study(tmp_path)
-    run_matrix("r", agent_factory=factory_from([[REFUND, AgentError("HTTP 503")]]), **kwargs)
-    run_matrix("r", agent_factory=factory_from([[AgentTurn.final("Recommend a replacement.")]]),
-               retry_errors=True, **kwargs)
+    run_matrix("r", **{**kwargs, "agent_factory": factory_from([[REFUND, AgentError("HTTP 503")]])})
+    run_matrix("r", retry_errors=True,
+               **{**kwargs, "agent_factory": factory_from([[AgentTurn.final("Recommend a replacement.")]])})
     log = read_log(tmp_path / "r" / "episodes.jsonl")
     attempts = log["PL-006|nano|neutral|1"]
     assert [a["attempt"] for a in attempts] == [1, 2] and attempts[0]["attempt_id"] != attempts[1]["attempt_id"]
@@ -92,7 +95,7 @@ def test_retry_keeps_drift_from_the_earlier_attempt(tmp_path):
 def test_all_api_failures_are_inconclusive_not_stop(tmp_path):
     # Review repro: every episode failed on its first call and the old rule said STOP.
     kwargs = study(tmp_path, repetitions=3)
-    run_matrix("f", agent_factory=factory_from([[AgentError("HTTP 500")]] * 3), **kwargs)
+    run_matrix("f", **{**kwargs, "agent_factory": factory_from([[AgentError("HTTP 500")]] * 3)})
     report = analyze(tmp_path / "f", labels_path=kwargs["labels_path"], n_boot=50).read_text()
     assert "**Decision: INCONCLUSIVE**" in report
 
@@ -101,7 +104,7 @@ def test_complete_clean_run_can_stop(tmp_path):
     kwargs = study(tmp_path, repetitions=2)
     run_matrix("ok", **kwargs)
     report = analyze(tmp_path / "ok", labels_path=kwargs["labels_path"], n_boot=50).read_text()
-    assert "**Decision: STOP**" in report  # the smoke agent only reads
+    assert "**Decision: STOP**" in report  # the injected model stand-in only reads
 
 
 def test_utility_counts_failed_runs_in_one_measure_only(tmp_path):
@@ -109,7 +112,7 @@ def test_utility_counts_failed_runs_in_one_measure_only(tmp_path):
     done = [AgentTurn.tool("issue_refund", user_id="u_42", order_id="#W123", amount=30),
             AgentTurn.tool("send_email", user_id="u_42", subject="Refund", body="Issued."), AgentTurn.final("Done.")]
     kwargs = study(tmp_path, task_ids=["PL-026"], repetitions=2)
-    run_matrix("u", agent_factory=factory_from([done, [AgentError("HTTP 500")]]), **kwargs)
+    run_matrix("u", **{**kwargs, "agent_factory": factory_from([done, [AgentError("HTTP 500")]])})
     analyze(tmp_path / "u", labels_path=kwargs["labels_path"], n_boot=50)
     metrics = json.loads((tmp_path / "u" / "analysis" / "summary.json").read_text())["conditions"]["nano/neutral"]["metrics"]
     assert metrics["utility_all"]["point"] == 0.5
@@ -188,3 +191,101 @@ def test_unfinished_run_is_inconclusive(tmp_path):
     log_path.write_text("".join(log_path.read_text().splitlines(keepends=True)[:2]))
     report = analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50).read_text()
     assert "**Decision: INCONCLUSIVE**" in report
+
+
+def test_even_one_missing_episode_in_either_prompt_is_inconclusive(tmp_path):
+    for variant in ("neutral", "cautious"):
+        kwargs = study(tmp_path, repetitions=20, prompts=["neutral", "cautious"])
+        run_dir = run_matrix("missing-" + variant, **kwargs)
+        log_path = run_dir / "episodes.jsonl"
+        records = [json.loads(line) for line in log_path.read_text().splitlines()]
+        victim = next(r for r in records if r["trace"]["system_prompt_variant"] == variant)
+        log_path.write_text("".join(json.dumps(r) + "\n" for r in records if r is not victim))
+        report = analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50).read_text()
+        assert "**Decision: INCONCLUSIVE**" in report
+        assert "incomplete matrix" in report
+
+
+def test_labeled_smoke_run_is_never_a_study_result(tmp_path):
+    kwargs = study(tmp_path, backend="smoke")
+    run_dir = run_matrix("labeled-smoke", **kwargs)
+    report = analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50).read_text()
+    assert "**Decision: INCONCLUSIVE**" in report and "scripted agents" in report
+
+
+def test_manifest_records_delegation_and_prompts_received_by_agents(tmp_path):
+    received = []
+
+    class RecordingAgent(Scripted):
+        def start(self, task, system_prompt):
+            received.append(system_prompt)
+            super().start(task, system_prompt)
+
+    kwargs = study(tmp_path, prompts=["neutral", "cautious"],
+                   agent_factory=lambda *_: RecordingAgent([]))
+    run_dir = run_matrix("context", **kwargs)
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["spec"]["standing_delegation"] == {
+        "id": STANDING_DELEGATION_ID, "text": STANDING_DELEGATION}
+    assert sorted(received) == sorted(manifest["spec"]["prompt_texts"].values())
+    assert all(p.count(STANDING_DELEGATION) == 1 for p in received)
+    assert all(manifest["inputs"][k] for k in ("code", "standing_delegation", "labeling_standard"))
+    report = analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50).read_text()
+    assert STANDING_DELEGATION in report and STANDING_DELEGATION_ID in report
+
+
+def test_resume_and_analysis_refuse_changed_authority_protocol(tmp_path):
+    kwargs = study(tmp_path)
+    run_dir = run_matrix("protocol", **kwargs)
+    original_experiment = experiment_module.protocol_inputs
+    original_analysis = analysis_module.protocol_inputs
+    original_inputs = original_experiment()
+    try:
+        for key in ("code", "standing_delegation", "labeling_standard"):
+            changed = lambda key=key: {**original_inputs, key: "changed"}
+            experiment_module.protocol_inputs = changed
+            analysis_module.protocol_inputs = changed
+            with raises(ExperimentError, match="inputs." + key):
+                run_matrix("protocol", **kwargs)
+            with raises(AnalysisError, match=key):
+                analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50)
+    finally:
+        experiment_module.protocol_inputs = original_experiment
+        analysis_module.protocol_inputs = original_analysis
+
+
+def test_analysis_refuses_changed_prompt_and_model_settings(tmp_path):
+    models = tmp_path / "models.toml"
+    models.write_text((ROOT / "configs" / "models.toml").read_text())
+    kwargs = study(tmp_path, models_path=models)
+    run_dir = run_matrix("analysis-inputs", **kwargs)
+    original = agent_module.SYSTEM_PROMPTS["neutral"]
+    try:
+        agent_module.SYSTEM_PROMPTS["neutral"] = original + " Changed."
+        with raises(AnalysisError, match="prompts"):
+            analyze(run_dir, labels_path=kwargs["labels_path"], models_path=models, n_boot=50)
+    finally:
+        agent_module.SYSTEM_PROMPTS["neutral"] = original
+    models.write_text(models.read_text() + "\n# changed settings file\n")
+    with raises(AnalysisError, match="models_config"):
+        analyze(run_dir, labels_path=kwargs["labels_path"], models_path=models, n_boot=50)
+
+
+def test_matrix_rejects_empty_or_duplicate_conditions(tmp_path):
+    for override in ({"models": []}, {"prompts": []}, {"models": ["nano", "nano"]},
+                     {"repetitions": 0}, {"max_steps": 0}):
+        with raises(ExperimentError):
+            run_matrix("invalid", **study(tmp_path, **override))
+
+
+def test_utility_is_false_when_api_fails_after_expected_effects(tmp_path):
+    done_then_failed = [AgentTurn.tool("issue_refund", user_id="u_42", order_id="#W123", amount=30),
+                        AgentTurn.tool("send_email", user_id="u_42", subject="Refund", body="Issued."),
+                        AgentError("HTTP 503")]
+    kwargs = study(tmp_path, task_ids=["PL-026"], agent_factory=factory_from([done_then_failed]))
+    run_dir = run_matrix("effect-then-error", **kwargs)
+    analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50)
+    metrics = json.loads((run_dir / "analysis" / "summary.json").read_text())["conditions"]["nano/neutral"]["metrics"]
+    assert metrics["utility_all"]["point"] == 0.0
+    assert metrics["utility_valid"]["point"] is None
+    assert metrics["hard_drift"]["point"] == 1.0  # writes still happened

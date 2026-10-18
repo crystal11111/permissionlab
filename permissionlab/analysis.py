@@ -9,7 +9,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from .experiment import read_log
+from .agent import SYSTEM_PROMPTS, prompt_sha256
+from .experiment import protocol_inputs, read_log
 from .io import file_sha256, load_rules, load_tasks
 from .policy import load_policy
 from .scoring import QUESTION_TYPES, score_episode
@@ -49,17 +50,23 @@ def combine_attempts(attempts: list[dict]) -> dict:
 
 
 def check_inputs(manifest: dict, *, tasks_path: Path, policy_path: Path, prereg_path: Path,
-                 labels_path: Path) -> bool:
+                 labels_path: Path, models_path: Path) -> bool:
     """Refuse to analyze against inputs that differ from the ones the run used.
 
     Returns whether the labels were fixed before the run (pre-registered).
     """
     inputs = manifest["inputs"]
     changed = [name for name, path in (("tasks", tasks_path), ("policy", policy_path),
-                                       ("preregistration", prereg_path))
+                                       ("preregistration", prereg_path), ("models_config", models_path))
                if inputs.get(name) != file_sha256(path)]
+    changed += [name for name, digest in protocol_inputs().items() if inputs.get(name) != digest]
+    current_prompts = {name: prompt_sha256(SYSTEM_PROMPTS[name])
+                       for name in manifest["spec"]["prompts"] if name in SYSTEM_PROMPTS}
+    if inputs.get("prompts") != current_prompts:
+        changed.append("prompts")
     if changed:
-        raise AnalysisError(f"{', '.join(changed)} changed since this run started; analyze with the original files")
+        raise AnalysisError(f"{', '.join(changed)} changed or were not pinned when this run started; "
+                            "analyze with the original code and files, or start a new run")
     if inputs.get("labels") is None:
         return False  # smoke run without labels: analyzable, but never a study result
     if inputs["labels"] != file_sha256(labels_path):
@@ -75,19 +82,28 @@ def validity(scores: list[dict], spec: dict, max_failed_share: float) -> dict[tu
             rows = [s for s in scores if (s["model"], s["prompt_variant"]) == (model, prompt)]
             failed = sum(s["failed"] for s in rows)
             missing = max(0, planned - len(rows))
-            share = (failed + missing) / planned if planned else 1.0
+            share = failed / len(rows) if rows else 1.0
             out[(model, prompt)] = {"planned": planned, "scored": len(rows), "failed": failed,
-                                    "missing": missing, "failed_share": share, "ok": share <= max_failed_share}
+                                    "missing": missing, "failed_share": share,
+                                    "ok": planned > 0 and len(rows) == planned and share <= max_failed_share}
     return out
 
 
-def decide(aggregates: dict, valid: dict, prereg: dict, labels_preregistered: bool) -> dict[str, Any]:
+def decide(aggregates: dict, valid: dict, prereg: dict, labels_preregistered: bool,
+           *, backend: str) -> dict[str, Any]:
     go, prompt = prereg["go"], prereg["primary"]["prompt"]
     base = {"prompt": prompt, "criteria": go}
+    if backend != "nebius":
+        return {**base, "decision": "INCONCLUSIVE", "rows": [],
+                "why": "smoke run: scripted agents are not model measurements"}
     if not labels_preregistered:
         return {**base, "decision": "INCONCLUSIVE", "rows": [],
-                "why": "labels were not fixed before this run (smoke run)"}
-    invalid = [f"{m}/{p}" for (m, p), v in valid.items() if p == prompt and not v["ok"]]
+                "why": "labels were not fixed before this run"}
+    invalid = [f"{m}/{p}" for (m, p), v in valid.items() if not v["ok"]]
+    if invalid or not valid:
+        return {**base, "decision": "INCONCLUSIVE", "rows": [],
+                "why": "incomplete matrix or too many failed episodes in: " +
+                       (", ".join(invalid) or "every condition")}
 
     def evaluate(metric: str) -> list[dict[str, Any]]:
         rows = []
@@ -121,6 +137,7 @@ def analyze(
     labels_path: Path = ROOT / "data" / "labels_adjudicated.csv",
     policy_path: Path = ROOT / "configs" / "consequence_policy.toml",
     prereg_path: Path = ROOT / "configs" / "preregistration.toml",
+    models_path: Path = ROOT / "configs" / "models.toml",
     n_boot: int | None = None,
 ) -> Path:
     run_dir = Path(run_dir)
@@ -134,7 +151,7 @@ def analyze(
 
     manifest = json.loads((run_dir / "manifest.json").read_text())
     labels_preregistered = check_inputs(manifest, tasks_path=tasks_path, policy_path=policy_path,
-                                        prereg_path=prereg_path, labels_path=labels_path)
+                                        prereg_path=prereg_path, labels_path=labels_path, models_path=models_path)
     all_tasks = load_tasks(tasks_path)
     tasks = {t.id: t for t in all_tasks}
     log = read_log(run_dir / "episodes.jsonl",
@@ -169,7 +186,7 @@ def analyze(
         b = [s for s in scores if s["model"] == model and s["prompt_variant"] == "cautious"]
         if a and b:
             paired[model] = paired_cluster_bootstrap(a, b, METRICS["hard_drift"], n_boot=n_boot, seed=seed, ci=ci)
-    decision = decide(aggregates, valid, prereg, labels_preregistered)
+    decision = decide(aggregates, valid, prereg, labels_preregistered, backend=manifest["spec"]["backend"])
 
     out = run_dir / "analysis"
     out.mkdir(exist_ok=True)
@@ -179,6 +196,8 @@ def analyze(
     write_question_review(out / "question_review.csv", scores, tasks)
     summary = {
         "run_id": run_dir.name, "labels_preregistered": labels_preregistered, "decision": decision,
+        "standing_delegation": manifest["spec"]["standing_delegation"],
+        "inputs": manifest["inputs"],
         "validity": {f"{m}/{p}": v for (m, p), v in valid.items()},
         "paired_neutral_minus_cautious": paired,
         "conditions": {f"{m}/{p}": v for (m, p), v in aggregates.items()},
@@ -187,6 +206,10 @@ def analyze(
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2, default=str) + "\n")
     report = render_report(run_dir.name, scores, aggregates, valid, paired, decision, n_boot, ci)
+    report += "\n## Authority context\n\n" + manifest["spec"]["standing_delegation"]["id"] + "\n\n"
+    report += "```text\n" + manifest["spec"]["standing_delegation"]["text"] + "\n```\n"
+    report += ("\nBoth prompt variants receive this delegation. Scores check human-adjudicated action labels "
+               "and argument constraints; they do not establish the truth or relevance of note/email content.\n")
     (out / "report.md").write_text(report)
     return out / "report.md"
 

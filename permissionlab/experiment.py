@@ -14,10 +14,12 @@ import tomllib
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable
 
 from .agent import SYSTEM_PROMPTS, AgentBackend, OpenAICompatibleAgent, ReplayAgent, prompt_sha256
+from .delegation import STANDING_DELEGATION, STANDING_DELEGATION_ID
 from .io import file_sha256, load_rules, load_tasks
 from .policy import load_policy
 from .runner import EpisodeRunner
@@ -63,6 +65,20 @@ def code_version() -> str | None:
         return commit + ("+uncommitted" if dirty else "")
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+def code_fingerprint() -> str:
+    """Pin executable study code, including uncommitted changes, not just Git HEAD."""
+    files = {path.relative_to(ROOT).as_posix(): file_sha256(path)
+             for folder in ("permissionlab", "scripts")
+             for path in sorted((ROOT / folder).rglob("*.py"))}
+    return sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+
+
+def protocol_inputs() -> dict[str, str]:
+    return {"labeling_standard": file_sha256(ROOT / "LABELING.md"),
+            "standing_delegation": prompt_sha256(STANDING_DELEGATION),
+            "code": code_fingerprint()}
 
 
 def smoke_agent(task: TaskSpec, model: str, cfg: dict) -> AgentBackend:
@@ -161,12 +177,18 @@ def run_matrix(
     agent_factory: AgentFactory | None = None,
     log: Callable[[str], None] = print,
 ) -> Path:
+    if not models or not prompts or repetitions < 1 or max_steps < 1:
+        raise ExperimentError("select models and prompts, with positive repetitions and max_steps")
+    if len(set(models)) != len(models) or len(set(prompts)) != len(prompts):
+        raise ExperimentError("models and prompts must not contain duplicates")
     if backend not in ("nebius", "smoke"):
         raise ExperimentError(f"unknown backend {backend!r}")
     if allow_unlabeled and backend != "smoke":
         raise ExperimentError("--allow-unlabeled is only for the smoke backend; label the tasks first")
     all_tasks = load_tasks(tasks_path)
     tasks = [t for t in all_tasks if not task_ids or t.id in task_ids]
+    if not tasks:
+        raise ExperimentError("no tasks selected")
     if task_ids and len(tasks) != len(set(task_ids)):
         raise ExperimentError(f"unknown task ids: {sorted(set(task_ids) - {t.id for t in tasks})}")
     model_configs = load_model_configs(models_path)
@@ -188,6 +210,9 @@ def run_matrix(
         "tasks": [t.id for t in tasks],
         "max_steps": max_steps,
         "labels_checked": not allow_unlabeled,
+        "standing_delegation": {"id": STANDING_DELEGATION_ID, "text": STANDING_DELEGATION},
+        "prompt_texts": {name: SYSTEM_PROMPTS[name] for name in prompts},
+        "seed": seed,
     }
     inputs = {
         "tasks": file_sha256(tasks_path),
@@ -196,6 +221,7 @@ def run_matrix(
         "models_config": file_sha256(models_path),
         "preregistration": file_sha256(prereg_path),
         "prompts": {name: prompt_sha256(SYSTEM_PROMPTS[name]) for name in prompts},
+        **protocol_inputs(),
     }
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)

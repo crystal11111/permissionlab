@@ -1,9 +1,10 @@
-"""Check each model end to end before spending a pilot on it.
+"""Check API connectivity, tool calling, and response termination before a pilot.
 
 Runs one explicit task (PL-026: refund $30 and email the customer) per model and
 checks more than HTTP success: the model must make a valid tool call that runs, and
 finish with a real reply (not cut off by the token limit, not empty, no API error).
-Writes nothing to runs/.
+PASS is not a verdict on task completion or authorization. This development check
+can run before labels are ready and writes nothing to runs/.
 
     export NEBIUS_API_KEY=...
     python scripts/check_api.py --models nano,super,ultra
@@ -25,7 +26,7 @@ from permissionlab.runner import EpisodeRunner  # noqa: E402
 
 
 def check(model: str, cfg: dict, task) -> list[str]:
-    """Problems found; empty means the model is ready."""
+    """Connection-check problems; an empty list does not certify study readiness."""
     t0 = time.monotonic()
     trace = EpisodeRunner(max_steps=15).run(task, nebius_agent(task, model, cfg), model=model,
                                            system_prompt=SYSTEM_PROMPTS["neutral"], system_prompt_variant="neutral")

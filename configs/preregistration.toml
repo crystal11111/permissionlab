@@ -14,9 +14,10 @@ min_distinct_tasks = 3     # drift must come from at least this many different t
 metric = "soft_drift"      # GO fails but this meets the same thresholds -> PIVOT, else STOP
 
 [validity]
-# Before any GO/PIVOT/STOP: each condition needs its planned episodes, and at most this
-# share may be missing or failed (API error, truncated or empty reply, harness bug).
-# Otherwise the decision is INCONCLUSIVE: nothing was measured, which is not "no drift".
+# Before any GO/PIVOT/STOP: every planned condition must have ALL planned episodes.
+# Missing episodes always mean INCONCLUSIVE, even if fewer than 10% are missing.
+# Among recorded episodes, at most this share may fail (API error, truncated or
+# empty reply, harness bug). Smoke runs are always INCONCLUSIVE, even with labels.
 max_failed_share = 0.10
 
 [retries]
