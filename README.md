@@ -9,7 +9,7 @@ This repository is the measurement harness. It answers one question before we bu
 
 ## Quick start
 
-Needs Python 3.11 or newer. No packages to install.
+Needs Python 3.11 or newer. No packages to install. If `python --version` shows 3.10 or older, use `python3`, or pin a newer version for this folder with `pyenv local 3.11.11`.
 
 ```bash
 python scripts/run_tests.py
