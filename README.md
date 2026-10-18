@@ -14,7 +14,8 @@ and emails. The compiler, gateway, and approval UI are future work.
 in the current case's internal notes. Explicit restrictions such as "read only" or
 "draft only" override that delegation. Customer contact, refunds, and cancellations
 are not delegated in advance. Both prompt variants and both labelers receive the
-same rule: [LABELING.md](LABELING.md).
+same delegation. Labelers also follow interpretation guidance that the agents never
+see, so the neutral prompt stays neutral: [LABELING.md](LABELING.md).
 
 ## Quick start
 
@@ -40,9 +41,10 @@ The demo replays an agent that overreaches on a recommend-only task, then prints
 ## How the study runs
 
 1. **Review the shared authority setting.** Read [LABELING.md](LABELING.md).
-   Crystal rechecks A under `case-documentation-v1`; Derek completes B independently.
+   Crystal rechecks A under `case-documentation-v2`; Derek completes B independently.
    Review both the labels and `constraints_json`. Keep filled sheets private from
-   the other labeler until both finish; record AI assistance.
+   the other labeler until both finish; record dates and AI assistance in
+   [data/labeling_record.md](data/labeling_record.md).
 2. **Agree on one set.** Resolve disagreements in labels and scope into
    `data/labels_adjudicated.csv`. Commit the reviewed protocol and sheets before
    the pilot. Changing the delegation or its documentation does not update labels automatically.
@@ -60,14 +62,14 @@ The demo replays an agent that overreaches on a recommend-only task, then prints
    compiler evaluation. Keep the key out of source files and commits.
 4. **Run the pilot**: 30 tasks × 2 models × 2 prompts × 5 repetitions = 600 episodes.
    ```bash
-   python scripts/run_matrix.py --run-id pilot-case-v1-001 --models nano,super --prompts neutral,cautious --reps 5
+   python scripts/run_matrix.py --run-id pilot-case-v2-001 --models nano,super --prompts neutral,cautious --reps 5
    ```
 5. **Analyze.**
    ```bash
-   python scripts/analyze.py runs/pilot-case-v1-001
+   python scripts/analyze.py runs/pilot-case-v2-001
    ```
    This writes `report.md`, `summary.json`, `scores.jsonl` and `question_review.csv`
-   to `runs/pilot-case-v1-001/analysis/`. The report includes the authority setting.
+   to `runs/pilot-case-v2-001/analysis/`. The report includes the authority setting.
 6. **Spot-check the questions.** Question types come from a keyword heuristic. Fill the `reviewer_question_type` column for a sample of `question_review.csv` before quoting those numbers.
 
 The full study adds `ultra` (900 episodes) under a new run ID. Model IDs, sampling,
@@ -80,7 +82,7 @@ runtime or cost of the whole matrix.
 **API errors.** `--retry-errors` re-runs episodes whose last attempt hit an API error. Earlier attempts stay in the log and still count (see [rules](#rules-that-keep-the-numbers-honest)).
 
 **A changed protocol needs a new run.** Do not resume runs from before
-`case-documentation-v1` into this setting. To reproduce an old analysis, use its
+`case-documentation-v2` into this setting. To reproduce an old analysis, use its
 original code and input files. Do not edit a manifest to bypass a mismatch.
 
 **Smoke test without a key** (fake agent, labels not needed):
@@ -156,9 +158,14 @@ explicit-execution tasks, not the quality of every answer or email.
 ## Rules that keep the numbers honest
 
 - **Everything is fixed first.** The manifest pins tasks, labels, consequence policy,
-  model settings, prompts, decision rule, labeling standard, delegation, and
-  executable study code. It also stores the exact prompt and delegation text.
-  Resuming or analyzing with changed inputs is refused.
+  model settings, prompts, decision rule, labeling standard, delegation, and the
+  runtime code that decides what agents see and do. It also stores the exact prompt
+  and delegation text. Resuming with any change is refused.
+- **Analysis can outlive the code.** Analysis requires the run's tasks, labels,
+  policy and decision rule. Other differences in the working copy (prompts, model
+  settings, delegation, runtime or analysis code) are disclosed in the report, with
+  the commit to check out for an exact reproduction, so a finished run never has to
+  be re-run because the code moved on.
 - **Incomplete runs are inconclusive.** Every planned condition must have every
   planned episode. Missing even one produces `INCONCLUSIVE`. More than 10% failed
   episodes in any condition also produces `INCONCLUSIVE`. Smoke runs always produce

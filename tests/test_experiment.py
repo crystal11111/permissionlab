@@ -229,32 +229,52 @@ def test_manifest_records_delegation_and_prompts_received_by_agents(tmp_path):
         "id": STANDING_DELEGATION_ID, "text": STANDING_DELEGATION}
     assert sorted(received) == sorted(manifest["spec"]["prompt_texts"].values())
     assert all(p.count(STANDING_DELEGATION) == 1 for p in received)
-    assert all(manifest["inputs"][k] for k in ("code", "standing_delegation", "labeling_standard"))
+    assert all(manifest["inputs"][k] for k in ("runtime_code", "standing_delegation", "labeling_standard"))
+    assert manifest["recorded"]["analysis_code"]
     report = analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50).read_text()
     assert STANDING_DELEGATION in report and STANDING_DELEGATION_ID in report
 
 
-def test_resume_and_analysis_refuse_changed_authority_protocol(tmp_path):
+def test_resume_refuses_a_changed_protocol_and_analysis_discloses_it(tmp_path):
     kwargs = study(tmp_path)
     run_dir = run_matrix("protocol", **kwargs)
     original_experiment = experiment_module.protocol_inputs
     original_analysis = analysis_module.protocol_inputs
     original_inputs = original_experiment()
+    labels = {"runtime_code": "runtime code", "standing_delegation": "standing delegation",
+              "labeling_standard": "labeling standard"}
     try:
-        for key in ("code", "standing_delegation", "labeling_standard"):
+        for key, label in labels.items():
             changed = lambda key=key: {**original_inputs, key: "changed"}
             experiment_module.protocol_inputs = changed
             analysis_module.protocol_inputs = changed
             with raises(ExperimentError, match="inputs." + key):
                 run_matrix("protocol", **kwargs)
-            with raises(AnalysisError, match=key):
-                analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50)
+            report = analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50).read_text()
+            assert "differs from the start of this run in: " + label in report
     finally:
         experiment_module.protocol_inputs = original_experiment
         analysis_module.protocol_inputs = original_analysis
 
 
-def test_analysis_refuses_changed_prompt_and_model_settings(tmp_path):
+def test_a_finished_run_can_be_analyzed_after_code_moves_on(tmp_path):
+    # Fixing an analysis bug after the pilot must not force re-running the paid matrix.
+    kwargs = study(tmp_path)
+    run_dir = run_matrix("later", **kwargs)
+    clean = analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50).read_text()
+    assert "matches everything pinned" in clean
+    original = analysis_module.analysis_code_fingerprint
+    try:
+        analysis_module.analysis_code_fingerprint = lambda: "fixed-analysis-code"
+        report = analyze(run_dir, labels_path=kwargs["labels_path"], n_boot=50).read_text()
+        assert "differs from the start of this run in: analysis code" in report
+        assert "check out commit" in report
+    finally:
+        analysis_module.analysis_code_fingerprint = original
+    run_matrix("later", **kwargs)  # resuming is unaffected by analysis code
+
+
+def test_analysis_discloses_changed_prompt_and_model_settings(tmp_path):
     models = tmp_path / "models.toml"
     models.write_text((ROOT / "configs" / "models.toml").read_text())
     kwargs = study(tmp_path, models_path=models)
@@ -262,13 +282,23 @@ def test_analysis_refuses_changed_prompt_and_model_settings(tmp_path):
     original = agent_module.SYSTEM_PROMPTS["neutral"]
     try:
         agent_module.SYSTEM_PROMPTS["neutral"] = original + " Changed."
-        with raises(AnalysisError, match="prompts"):
-            analyze(run_dir, labels_path=kwargs["labels_path"], models_path=models, n_boot=50)
+        report = analyze(run_dir, labels_path=kwargs["labels_path"], models_path=models, n_boot=50).read_text()
+        assert "system prompts" in report
     finally:
         agent_module.SYSTEM_PROMPTS["neutral"] = original
     models.write_text(models.read_text() + "\n# changed settings file\n")
-    with raises(AnalysisError, match="models_config"):
-        analyze(run_dir, labels_path=kwargs["labels_path"], models_path=models, n_boot=50)
+    report = analyze(run_dir, labels_path=kwargs["labels_path"], models_path=models, n_boot=50).read_text()
+    assert "model settings" in report
+
+
+def test_analysis_refuses_changed_scoring_inputs(tmp_path):
+    prereg = tmp_path / "prereg.toml"
+    prereg.write_text((ROOT / "configs" / "preregistration.toml").read_text())
+    kwargs = study(tmp_path, prereg_path=prereg)
+    run_dir = run_matrix("scoring-inputs", **kwargs)
+    prereg.write_text(prereg.read_text().replace("min_rate = 0.05", "min_rate = 0.01"))
+    with raises(AnalysisError, match="preregistration"):
+        analyze(run_dir, labels_path=kwargs["labels_path"], prereg_path=prereg, n_boot=50)
 
 
 def test_matrix_rejects_empty_or_duplicate_conditions(tmp_path):

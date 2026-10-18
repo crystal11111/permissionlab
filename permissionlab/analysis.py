@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .agent import SYSTEM_PROMPTS, prompt_sha256
-from .experiment import protocol_inputs, read_log
+from .experiment import analysis_code_fingerprint, protocol_inputs, read_log
 from .io import file_sha256, load_rules, load_tasks
 from .policy import load_policy
 from .scoring import QUESTION_TYPES, score_episode
@@ -50,28 +50,41 @@ def combine_attempts(attempts: list[dict]) -> dict:
 
 
 def check_inputs(manifest: dict, *, tasks_path: Path, policy_path: Path, prereg_path: Path,
-                 labels_path: Path, models_path: Path) -> bool:
-    """Refuse to analyze against inputs that differ from the ones the run used.
+                 labels_path: Path, models_path: Path) -> tuple[bool, list[str]]:
+    """Enforce the inputs that define how a run is scored; disclose everything else.
 
-    Returns whether the labels were fixed before the run (pre-registered).
+    Tasks, labels, policy and the decision rule must match the run. Prompts, model
+    settings, the delegation, the labeling standard and code shaped what the agents
+    did, which the log already records, or how this analysis runs; a difference there
+    is reported, not refused, so a later code change never strands a finished run.
+    Returns (labels were fixed before the run, what in the working copy differs).
     """
     inputs = manifest["inputs"]
     changed = [name for name, path in (("tasks", tasks_path), ("policy", policy_path),
-                                       ("preregistration", prereg_path), ("models_config", models_path))
+                                       ("preregistration", prereg_path))
                if inputs.get(name) != file_sha256(path)]
-    changed += [name for name, digest in protocol_inputs().items() if inputs.get(name) != digest]
+    if changed:
+        raise AnalysisError(f"{', '.join(changed)} changed since this run started; they define how the run "
+                            "is scored. Analyze with the original files.")
+    preregistered = inputs.get("labels") is not None
+    if preregistered and inputs["labels"] != file_sha256(labels_path):
+        raise AnalysisError("this label file is not the one the run was started with")
+
+    differs = []
+    if inputs.get("models_config") != file_sha256(models_path):
+        differs.append("model settings")
     current_prompts = {name: prompt_sha256(SYSTEM_PROMPTS[name])
                        for name in manifest["spec"]["prompts"] if name in SYSTEM_PROMPTS}
     if inputs.get("prompts") != current_prompts:
-        changed.append("prompts")
-    if changed:
-        raise AnalysisError(f"{', '.join(changed)} changed or were not pinned when this run started; "
-                            "analyze with the original code and files, or start a new run")
-    if inputs.get("labels") is None:
-        return False  # smoke run without labels: analyzable, but never a study result
-    if inputs["labels"] != file_sha256(labels_path):
-        raise AnalysisError("this label file is not the one the run was started with")
-    return True
+        differs.append("system prompts")
+    current = protocol_inputs()
+    for key, label in (("labeling_standard", "labeling standard"), ("standing_delegation", "standing delegation"),
+                       ("runtime_code", "runtime code")):
+        if inputs.get(key) != current[key]:
+            differs.append(label)
+    if manifest.get("recorded", {}).get("analysis_code") != analysis_code_fingerprint():
+        differs.append("analysis code")
+    return preregistered, differs
 
 
 def validity(scores: list[dict], spec: dict, max_failed_share: float) -> dict[tuple[str, str], dict]:
@@ -150,7 +163,7 @@ def analyze(
     seed, ci = cfg["seed"], cfg["ci"]
 
     manifest = json.loads((run_dir / "manifest.json").read_text())
-    labels_preregistered = check_inputs(manifest, tasks_path=tasks_path, policy_path=policy_path,
+    labels_preregistered, differs = check_inputs(manifest, tasks_path=tasks_path, policy_path=policy_path,
                                         prereg_path=prereg_path, labels_path=labels_path, models_path=models_path)
     all_tasks = load_tasks(tasks_path)
     tasks = {t.id: t for t in all_tasks}
@@ -197,6 +210,7 @@ def analyze(
     summary = {
         "run_id": run_dir.name, "labels_preregistered": labels_preregistered, "decision": decision,
         "standing_delegation": manifest["spec"]["standing_delegation"],
+        "working_copy_differs_from_run_start": differs,
         "inputs": manifest["inputs"],
         "validity": {f"{m}/{p}": v for (m, p), v in valid.items()},
         "paired_neutral_minus_cautious": paired,
@@ -210,6 +224,14 @@ def analyze(
     report += "```text\n" + manifest["spec"]["standing_delegation"]["text"] + "\n```\n"
     report += ("\nBoth prompt variants receive this delegation. Scores check human-adjudicated action labels "
                "and argument constraints; they do not establish the truth or relevance of note/email content.\n")
+    commit = (manifest.get("invocations") or [{}])[0].get("code") or "unknown"
+    report += "\n## Reproducibility\n\n"
+    if differs:
+        report += (f"The working copy differs from the start of this run in: {', '.join(differs)}. "
+                   "Scores come from the recorded log and the pinned tasks, labels, policy and decision rule. "
+                   f"To reproduce this analysis exactly, check out commit `{commit}`.\n")
+    else:
+        report += f"The working copy matches everything pinned when this run started (commit `{commit}`).\n"
     (out / "report.md").write_text(report)
     return out / "report.md"
 

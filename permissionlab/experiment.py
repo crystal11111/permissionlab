@@ -67,18 +67,36 @@ def code_version() -> str | None:
         return None
 
 
-def code_fingerprint() -> str:
-    """Pin executable study code, including uncommitted changes, not just Git HEAD."""
-    files = {path.relative_to(ROOT).as_posix(): file_sha256(path)
-             for folder in ("permissionlab", "scripts")
-             for path in sorted((ROOT / folder).rglob("*.py"))}
+# Code that only interprets a finished log. Changing it never changes what the agents
+# saw or did, so it is recorded (and disclosed at analysis) rather than enforced.
+ANALYSIS_CODE = ("permissionlab/analysis.py", "permissionlab/scoring.py", "permissionlab/stats.py",
+                 "permissionlab/policy.py", "scripts/analyze.py")
+
+
+def _fingerprint(paths: list[Path]) -> str:
+    files = {path.relative_to(ROOT).as_posix(): file_sha256(path) for path in paths}
     return sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
 
 
+def runtime_code_fingerprint() -> str:
+    """Code that decides what agents see and what tools do, including uncommitted edits.
+
+    Every package module counts unless listed in ANALYSIS_CODE, so a new module is pinned by default.
+    """
+    files = [path for path in sorted((ROOT / "permissionlab").glob("*.py"))
+             if path.relative_to(ROOT).as_posix() not in ANALYSIS_CODE]
+    return _fingerprint(files + [ROOT / "scripts" / "run_matrix.py"])
+
+
+def analysis_code_fingerprint() -> str:
+    return _fingerprint([ROOT / path for path in ANALYSIS_CODE])
+
+
 def protocol_inputs() -> dict[str, str]:
+    """Pinned for resume: everything that shaped what the agents saw or did."""
     return {"labeling_standard": file_sha256(ROOT / "LABELING.md"),
             "standing_delegation": prompt_sha256(STANDING_DELEGATION),
-            "code": code_fingerprint()}
+            "runtime_code": runtime_code_fingerprint()}
 
 
 def smoke_agent(task: TaskSpec, model: str, cfg: dict) -> AgentBackend:
@@ -137,7 +155,8 @@ def repair_torn_tail(path: Path, log: Callable[[str], None]) -> None:
 
 
 def build_manifest(*, spec: dict, inputs: dict) -> dict:
-    return {"spec": spec, "inputs": inputs}
+    # "recorded" is kept for disclosure only; resumes compare spec and inputs.
+    return {"spec": spec, "inputs": inputs, "recorded": {"analysis_code": analysis_code_fingerprint()}}
 
 
 def check_manifest(manifest_path: Path, fresh: dict) -> dict:
