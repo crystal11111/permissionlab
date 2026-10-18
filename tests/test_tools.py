@@ -57,3 +57,12 @@ def test_malformed_arguments_are_rejected_before_running():
 def test_labeled_actions_and_schemas_cover_the_state_changing_tools():
     assert LABELED_ACTIONS == ("add_internal_note", "issue_refund", "send_email", "cancel_order")
     assert len(openai_tool_schemas()) == 8
+
+
+def test_order_ids_without_hash_reach_the_same_order():
+    # Both Nemotron models first sent "W123" during the API check and were refused.
+    db = RetailDB.fresh()
+    tools = RetailTools(db)
+    assert tools.execute("get_order", {"order_id": "W123"})["id"] == "#W123"
+    tools.execute("issue_refund", {"user_id": "U_42", "order_id": "w123", "amount": 30})
+    assert db.state["orders"]["#W123"]["refund_total"] == 30

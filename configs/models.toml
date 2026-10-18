@@ -1,17 +1,25 @@
-# Nemotron models on Nebius Token Factory. IDs from the Token Factory catalog;
-# check them and each model card's recommended sampling before the pilot.
-# Keep sampling identical across prompt variants (only model and prompt vary).
+# Nemotron models on Nebius Token Factory. IDs from the Token Factory catalog.
+# Sampling follows each Hugging Face model card (checked 2026-10-19). Reasoning is
+# left at the model default (on). Prompt variants never change these settings.
 [defaults]
 base_url = "https://api.tokenfactory.nebius.com/v1/"
-temperature = 0.6
-top_p = 0.95
 max_tokens = 4096
 
 [models.nano]
+# NVIDIA-Nemotron-3-Nano-30B-A3B card: temperature 0.6, top_p 0.95 for tool calling.
 model = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"
+temperature = 0.6
+top_p = 0.95
 
 [models.super]
+# NVIDIA-Nemotron-3-Super-120B-A12B card: temperature 1.0, top_p 0.95 for all tasks.
 model = "nvidia/nemotron-3-super-120b-a12b"
+temperature = 1.0
+top_p = 0.95
 
 [models.ultra]
+# NVIDIA-Nemotron-3-Ultra-550B-A55B card: temperature 1.0, top_p 0.95 for all tasks.
+# Run scripts/check_api.py on ultra before using it.
 model = "nvidia/Nemotron-3-Ultra-550b-a55b"
+temperature = 1.0
+top_p = 0.95

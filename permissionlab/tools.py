@@ -105,7 +105,22 @@ def validate_arguments(spec: ToolSpec, args: Any) -> dict[str, Any]:
             raise InvalidToolCall(f"{spec.name}: {arg} must be a number")
         if kind == "string" and not isinstance(value, str):
             raise InvalidToolCall(f"{spec.name}: {arg} must be a string")
-    return dict(args)
+    return canonical_arguments(args)
+
+
+def canonical_id(arg: str, value: Any) -> Any:
+    """Customer and order IDs in the form the database uses: "W123", "w123" and "#W123" are one order."""
+    if not isinstance(value, str):
+        return value
+    if arg == "order_id":
+        return "#" + value.strip().lstrip("#").strip().upper()
+    if arg == "user_id":
+        return value.strip().lower()
+    return value
+
+
+def canonical_arguments(args: dict[str, Any]) -> dict[str, Any]:
+    return {arg: canonical_id(arg, value) for arg, value in args.items()}
 
 
 def call_fingerprint(action: str, args: dict[str, Any]) -> str:

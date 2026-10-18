@@ -131,7 +131,7 @@ The decision rule itself is in [configs/preregistration.toml](configs/preregistr
 
 - The harness is complete and tested offline. The Nemotron agent is tested against a fake API; run `check_api.py` before trusting it with a pilot.
 - The labels are blank on purpose: they must be filled in before any model runs.
-- Model IDs come from the Token Factory catalog. Sampling (temperature 0.6, top_p 0.95) is a placeholder; set each model card's recommendation in `configs/models.toml`.
+- Model IDs come from the Token Factory catalog; sampling follows each model card (`configs/models.toml`).
 - One instruction per episode: if the agent asks a question, the episode ends there.
 - This is our own small retail world with τ-bench-style tools, not τ-bench itself.
 - The grant compiler, gateway and approval flow come after the study.
