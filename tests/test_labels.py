@@ -7,6 +7,13 @@ from tests.helpers import raises
 
 ROOT = Path(__file__).resolve().parents[1]
 TASKS = load_tasks(ROOT / "data" / "tasks.jsonl")
+
+
+def blank_sheet(tmp_path):
+    rows = [{"task_id": t.id, "action": a, "label": ""} for t in TASKS for a in LABELED_ACTIONS]
+    path = tmp_path / "blank.csv"
+    write_labels(path, rows)
+    return path
 HEADERS = ["task_id", "category", "prompt", "action", "label", "constraints_json", "notes"]
 
 
@@ -22,16 +29,16 @@ def full_rows(label="NOT_AUTHORIZED"):
     return [{"task_id": t.id, "action": a, "label": label} for t in TASKS for a in LABELED_ACTIONS]
 
 
-def test_blank_label_file_is_rejected():
-    # Review repro: the shipped sheets are blank; loading them must fail, not return {}.
+def test_blank_label_file_is_rejected(tmp_path):
+    # Review repro: a blank sheet must fail to load, not return {}.
     with raises(LabelValidationError) as err:
-        load_rules(ROOT / "data" / "labels_adjudicated.csv", TASKS)
+        load_rules(blank_sheet(tmp_path), TASKS)
     assert len(err.value.problems) == 120
     assert "label is blank" in err.value.problems[0]
 
 
-def test_allow_incomplete_is_explicit():
-    assert load_rules(ROOT / "data" / "labels_adjudicated.csv", TASKS, allow_incomplete=True) == {}
+def test_allow_incomplete_is_explicit(tmp_path):
+    assert load_rules(blank_sheet(tmp_path), TASKS, allow_incomplete=True) == {}
 
 
 def test_complete_labels_load(tmp_path):

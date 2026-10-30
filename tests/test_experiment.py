@@ -66,9 +66,12 @@ def study(tmp_path, **overrides):
 
 
 def test_matrix_refuses_blank_labels(tmp_path):
+    blank = tmp_path / "blank.csv"
+    blank.write_text("task_id,action,label,constraints_json\n" + "".join(
+        f"PL-{i:03d},{a},,{{}}\n" for i in range(1, 31) for a in LABELED_ACTIONS))
     with raises(LabelValidationError):
         run_matrix("x", models=["nano"], prompts=["neutral"], repetitions=1, backend="smoke",
-                   runs_dir=tmp_path, log=QUIET)
+                   labels_path=blank, runs_dir=tmp_path, log=QUIET)
 
 
 def test_allow_unlabeled_is_smoke_only(tmp_path):
