@@ -213,9 +213,13 @@ Apache License 2.0. See [LICENSE](LICENSE).
 
 ## Results dashboard
 
-The dashboard is a static page with three layers: the model comparison, one
-request/action example, and an episode explorer. Exact metrics and study limitations
-are collapsed below. It uses no API key and makes no model calls.
+The dashboard shows two model numbers and one request/action example on the first
+screen. A Standard/Cautious toggle switches the comparison. The episode explorer,
+exact statistics, and method sit inside one collapsed Details section. The static
+page uses no API key and makes no model calls. Public output omits message bodies,
+internal note contents, customer names/contact addresses, and closing replies.
+Only fixed task prompts, tool actions, synthetic IDs, amounts, and authority tags
+are exported for the case view.
 
 After analysis, build it from **the same run directory**:
 

@@ -22,11 +22,28 @@ def test_waiting_dashboard_does_not_invent_pilot_results():
 
 def test_dashboard_embeds_untrusted_text_without_script_execution():
     data = dashboard.snapshot()
-    data['episodes'][0]['instruction'] = '</script><script>alert(1)</script>'
+    data['label_basis'] = '</script><script>alert(1)</script>'
     html = dashboard.render(data)
     assert '</script><script>alert(1)' not in html
     payload = html.split('<script id="dashboard-data" type="application/json">')[1].split('</script>')[0]
-    assert json.loads(payload)['episodes'][0]['instruction'] == data['episodes'][0]['instruction']
+    assert json.loads(payload)['label_basis'] == data['label_basis']
+
+
+def test_public_page_omits_message_bodies_names_and_transcript_fields():
+    data = dashboard.snapshot()
+    episode = data['episodes'][0]
+    episode['instruction'] = 'Private instruction about Sensitive Person'
+    episode['attempts'][0]['answer'] = 'Sensitive Person at private@example.test'
+    episode['attempts'][0]['calls'][1]['arguments'].update(
+        body='Sensitive Person private@example.test', note='Private case detail', customer_name='Sensitive Person')
+    episode['attempts'][0]['calls'][1]['reason'] = 'Private case detail'
+    data['transcript'] = 'private@example.test'
+    html = dashboard.render(data)
+    assert 'Sensitive Person' not in html and 'private@example.test' not in html
+    assert 'Private case detail' not in html and 'Private instruction' not in html
+    payload = html.split('<script id="dashboard-data" type="application/json">')[1].split('</script>')[0]
+    public = json.loads(payload)
+    assert public['episodes'][0]['attempts'][0]['calls'][1]['arguments']['amount'] == 100
 
 
 def test_progress_counts_unique_episodes_and_preserves_retries(tmp_path):

@@ -8,6 +8,7 @@ Without --run-dir, generate an honest waiting page with the clearly marked offli
 from __future__ import annotations
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -115,9 +116,45 @@ def snapshot(run_dir: Path | None = None) -> dict:
     return data
 
 
+def public_payload(data: dict) -> dict:
+    """Publish only fields the UI needs, never raw message bodies or case notes."""
+    out = {k: data[k] for k in ("generated_at", "mode", "run_id", "backend", "progress", "decision",
+                               "warnings", "label_basis") if k in data}
+    for key in ("models", "analysis_changes"):
+        if key in data:
+            out[key] = data[key]
+    out["conditions"] = {key: {"n": value["n"], "metrics": value["metrics"]}
+                         for key, value in data.get("conditions", {}).items()}
+    tasks = {t.id: t.prompt for t in load_tasks(ROOT / "data/tasks.jsonl")}
+    out["episodes"] = []
+    for episode in data.get("episodes", []):
+        item = {k: episode[k] for k in ("key", "task_id", "model", "prompt", "hard_drift", "soft_drift",
+                                        "end_reason", "illustrative")}
+        # The public, fixed task prompt is the source; don't copy arbitrary transcript text.
+        item["instruction"] = tasks.get(item["task_id"], "Task instruction unavailable.")
+        item["attempts"] = []
+        for attempt in episode["attempts"]:
+            calls = []
+            for call in attempt["calls"]:
+                args = call.get("arguments", {})
+                safe_args = {}
+                for field, pattern in (("user_id", r"[uU]_\d+"), ("order_id", r"#?[wW]\d+")):
+                    value = args.get(field)
+                    if isinstance(value, str) and re.fullmatch(pattern, value):
+                        safe_args[field] = value
+                if isinstance(args.get("amount"), (int, float)) and not isinstance(args["amount"], bool):
+                    safe_args["amount"] = args["amount"]
+                calls.append({"action": call["action"], "arguments": safe_args,
+                              "status": call["status"], "authority": call.get("authority")})
+            item["attempts"].append({"number": attempt["number"], "end_reason": attempt["end_reason"],
+                                     "calls": calls})
+        out["episodes"].append(item)
+    return out
+
+
 def render(data: dict) -> str:
     template = (ROOT / "scripts/dashboard/template.html").read_text()
-    payload = json.dumps(data, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c").replace("&", "\\u0026")
+    payload = json.dumps(public_payload(data), ensure_ascii=False, allow_nan=False).replace("<", "\\u003c").replace("&", "\\u0026")
     return template.replace("__PERMISSIONLAB_DATA__", payload)
 
 
