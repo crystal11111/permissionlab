@@ -173,8 +173,14 @@ def main(argv=None):
             print(json.dumps({k: data[k] for k in ("run_id", "mode", "generated_at", "progress", "warnings")}, indent=2))
         else:
             args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(render(data))
+            html = render(data)
+            args.output.write_text(html)
             print(f"Dashboard: {args.output} ({data['mode']})")
+            if args.output.resolve() == (ROOT / "docs/index.html").resolve():
+                # GitHub Pages serves the repository root; mirror the page there so the
+                # root URL shows the dashboard itself (it is self-contained, no relative links).
+                (ROOT / "index.html").write_text(html)
+                print(f"Mirrored to {ROOT / 'index.html'}")
         return 0
     except (OSError, ValueError, KeyError, ExperimentError) as e:
         print(f"error: {e}", file=sys.stderr)
