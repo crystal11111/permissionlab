@@ -210,3 +210,49 @@ The decision rule itself is in [configs/preregistration.toml](configs/preregistr
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
+
+## Results dashboard
+
+The dashboard is a static page with three layers: the model comparison, one
+request/action example, and an episode explorer. Exact metrics and study limitations
+are collapsed below. It uses no API key and makes no model calls.
+
+After analysis, build it from **the same run directory**:
+
+```bash
+python scripts/build_dashboard.py --run-dir runs/pilot-case-v2-001
+```
+
+This writes `docs/index.html`. Commit that file and configure GitHub Pages to
+publish `main` → `/docs`. The page is a dated snapshot, not a live runner connection.
+The default page uses a clearly labeled offline replay and shows no pilot rates.
+To inspect a running log without generating or publishing a page:
+
+```bash
+python scripts/build_dashboard.py --run-dir runs/pilot-case-v2-001 --status
+```
+
+The status counts unique planned episodes separately from retry attempts, reports
+API errors and truncated replies, and shows the last recorded timestamp. It does
+not guess a completion time. Refresh it locally as needed. This does not expose
+your local progress to someone who only has access to GitHub.
+
+The builder hides stale rates when new attempts appear after analysis. It never
+turns an incomplete or smoke run into a final study conclusion. All episodes are
+available in the explorer; the first displayed example is a disclosed drift case
+when one exists. Earlier retry attempts stay visible. If original labels are not
+available to classify an older attempt, its actions are shown as unclassified.
+
+Publishing presentation files does not change the running experiment. Avoid
+editing agent/runtime code, labels, or protocol while a paid matrix is in flight.
+If labels B are used provisionally instead of a human-adjudicated A/B consensus,
+record that choice explicitly before citing the results; do not describe it as
+consensus or invent completion of A's re-review.
+
+For this provisional B-only pilot, disclose the labeling status on the page:
+
+```bash
+python scripts/build_dashboard.py --run-dir runs/pilot-case-v2-001 --label-basis 'Derek B labels; A not re-reviewed under v2; no A/B consensus adjudication.'
+```
+
+This disclosure is displayed as supplied; the builder does not verify human review.
